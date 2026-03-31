@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Authenticating...</title>
+</head>
+<body>
+  <p>Completing sign-in&hellip;</p>
+  <script src="/msal-redirect-bridge.js"></script>
+  <script>
+    if (window.msalRedirectBridge && (window.location.hash || window.location.search)) {
+      window.msalRedirectBridge.broadcastResponseToMainFrame()
+        .catch(function(err) { console.error("Redirect bridge error:", err); });
+    }
+  </script>
+</body>
+</html>
