@@ -30,6 +30,8 @@ export interface Solution {
 export type ComponentType =
   | "solution"
   | "table"
+  | "column"
+  | "relationship"
   | "canvas_app"
   | "model_driven_app"
   | "cloud_flow"
@@ -38,7 +40,24 @@ export type ComponentType =
   | "security_role"
   | "choice"
   | "business_rule"
-  | "bpf";
+  | "bpf"
+  | "web_resource"
+  | "form"
+  | "view"
+  | "chart"
+  | "sitemap"
+  | "plugin_assembly"
+  | "sdk_step"
+  | "custom_control"
+  | "custom_api"
+  | "agent"
+  | "agent_component"
+  | "card"
+  | "component_library"
+  | "report"
+  | "email_template"
+  | "ribbon"
+  | "other";
 
 export interface SolutionComponent {
   id: string;

@@ -1,18 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  ReactFlow,
-  Background,
-  Controls,
-  MiniMap,
-  type Node,
-  type Edge,
-  Position,
-  MarkerType,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import dagre from "dagre";
 import { useMigrationWizardStore, useEnvironmentStore } from "@/lib/stores";
 import { useAuth } from "@/lib/auth/auth-context";
 import { listSolutionComponents, getSolutionDependencies } from "@/lib/api/power-platform";
@@ -25,15 +13,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, ArrowRight, GitBranch, RefreshCw } from "lucide-react";
-import type { ComponentType, DependencyGraph } from "@/lib/types";
-
-const NODE_WIDTH = 220;
-const NODE_HEIGHT = 60;
+import { ArrowLeft, ArrowRight, GitBranch, RefreshCw, ChevronRight, ChevronDown } from "lucide-react";
+import type { ComponentType, DependencyGraph, DependencyNode as DepNode } from "@/lib/types";
 
 const typeColors: Record<ComponentType, string> = {
   solution: "#6366f1",
   table: "#22c55e",
+  column: "#86efac",
+  relationship: "#4ade80",
   canvas_app: "#f59e0b",
   model_driven_app: "#f97316",
   cloud_flow: "#3b82f6",
@@ -43,56 +30,255 @@ const typeColors: Record<ComponentType, string> = {
   choice: "#ec4899",
   business_rule: "#14b8a6",
   bpf: "#a855f7",
+  web_resource: "#0ea5e9",
+  form: "#d946ef",
+  view: "#10b981",
+  chart: "#f472b6",
+  sitemap: "#78716c",
+  plugin_assembly: "#64748b",
+  sdk_step: "#94a3b8",
+  custom_control: "#c084fc",
+  custom_api: "#818cf8",
+  agent: "#fb923c",
+  agent_component: "#fdba74",
+  card: "#fbbf24",
+  component_library: "#2dd4bf",
+  report: "#a78bfa",
+  email_template: "#38bdf8",
+  ribbon: "#737373",
+  other: "#9ca3af",
 };
 
-function layoutGraph(graph: DependencyGraph) {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "TB", nodesep: 60, ranksep: 80 });
+const typeLabels: Record<ComponentType, string> = {
+  solution: "Solution",
+  table: "Table",
+  column: "Column",
+  relationship: "Relationship",
+  canvas_app: "Canvas App",
+  model_driven_app: "Model App",
+  cloud_flow: "Cloud Flow",
+  env_variable: "Env Variable",
+  connection_reference: "Connection Ref",
+  security_role: "Security Role",
+  choice: "Choice",
+  business_rule: "Business Rule",
+  bpf: "BPF",
+  web_resource: "Web Resource",
+  form: "Form",
+  view: "View",
+  chart: "Chart",
+  sitemap: "Site Map",
+  plugin_assembly: "Plugin",
+  sdk_step: "SDK Step",
+  custom_control: "Custom Control",
+  custom_api: "Custom API",
+  agent: "Agent",
+  agent_component: "Topic",
+  card: "Card",
+  component_library: "Component Library",
+  report: "Report",
+  email_template: "Email Template",
+  ribbon: "Ribbon",
+  other: "Other",
+};
 
-  graph.nodes.forEach((node) => {
-    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
-  });
-  graph.edges.forEach((edge) => {
-    g.setEdge(edge.source, edge.target);
-  });
+// ─── Tree structures ──────────────────────────────────────
+interface TreeNode {
+  id: string;
+  label: string;
+  type: ComponentType;
+  children: TreeNode[];
+}
 
-  dagre.layout(g);
+function buildTree(graph: DependencyGraph): TreeNode[] {
+  const nodeMap = new Map<string, DepNode>();
+  for (const n of graph.nodes) nodeMap.set(n.id, n);
 
-  const nodes: Node[] = graph.nodes.map((node) => {
-    const { x, y } = g.node(node.id);
-    return {
-      id: node.id,
-      position: { x: x - NODE_WIDTH / 2, y: y - NODE_HEIGHT / 2 },
-      data: { label: node.label, type: node.type },
-      sourcePosition: Position.Bottom,
-      targetPosition: Position.Top,
-      style: {
-        background: typeColors[node.type] || "#6b7280",
-        color: "white",
-        border: "none",
-        borderRadius: "8px",
-        padding: "8px 12px",
-        fontSize: "11px",
-        fontWeight: 500,
-        width: NODE_WIDTH,
-        textAlign: "center" as const,
-        whiteSpace: "pre-line" as const,
-        lineHeight: "1.3",
-      },
-    };
-  });
+  // Find which nodes are children (targets of edges)
+  const childIds = new Set(graph.edges.map((e) => e.target));
+  // Build children lookup: parentId → [childIds]
+  const childrenOf = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    const arr = childrenOf.get(e.source) || [];
+    arr.push(e.target);
+    childrenOf.set(e.source, arr);
+  }
 
-  const edges: Edge[] = graph.edges.map((edge, i) => ({
-    id: `e-${i}`,
-    source: edge.source,
-    target: edge.target,
-    animated: true,
-    markerEnd: { type: MarkerType.ArrowClosed },
-    style: { stroke: "#94a3b8", strokeWidth: 1.5 },
-  }));
+  function buildNode(id: string, visited: Set<string>): TreeNode | null {
+    if (visited.has(id)) return null;
+    visited.add(id);
+    const node = nodeMap.get(id);
+    if (!node) return null;
+    const kids = (childrenOf.get(id) || [])
+      .map((cid) => buildNode(cid, visited))
+      .filter(Boolean) as TreeNode[];
+    // Sort children by type first (alphabetical by type label), then by name within same type
+    const typeOrder = Object.keys(typeLabels);
+    kids.sort((a, b) => {
+      const aIdx = typeOrder.indexOf(a.type);
+      const bIdx = typeOrder.indexOf(b.type);
+      const aOrder = aIdx === -1 ? 999 : aIdx;
+      const bOrder = bIdx === -1 ? 999 : bIdx;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return a.label.localeCompare(b.label);
+    });
+    return { id: node.id, label: node.label, type: node.type, children: kids };
+  }
 
-  return { nodes, edges };
+  // Root nodes = nodes that are NOT a child of any edge
+  const roots = graph.nodes
+    .filter((n) => !childIds.has(n.id))
+    .map((n) => buildNode(n.id, new Set()))
+    .filter(Boolean) as TreeNode[];
+
+  // If every node is a child (cycle), just use all nodes as roots
+  if (roots.length === 0) {
+    return graph.nodes.map((n) => ({
+      id: n.id,
+      label: n.label,
+      type: n.type,
+      children: [],
+    }));
+  }
+
+  return roots;
+}
+
+function TreeItem({ node, depth = 0 }: { node: TreeNode; depth?: number }) {
+  const [expanded, setExpanded] = useState(depth < 2);
+  const hasChildren = node.children.length > 0;
+  const color = typeColors[node.type] || "#6b7280";
+  const label = node.label.replace(/\n/g, " — ");
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors"
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
+        onClick={() => hasChildren && setExpanded(!expanded)}
+      >
+        {hasChildren ? (
+          expanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )
+        ) : (
+          <span className="w-4 shrink-0" />
+        )}
+        <span
+          className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+          style={{ backgroundColor: color }}
+        />
+        <span className="text-sm truncate font-medium">{label}</span>
+        <Badge
+          variant="outline"
+          className="ml-auto text-[10px] shrink-0"
+          style={{ borderColor: color, color }}
+        >
+          {typeLabels[node.type] || node.type}
+        </Badge>
+        {hasChildren && (
+          <span className="text-[10px] text-muted-foreground shrink-0">
+            ({node.children.length})
+          </span>
+        )}
+      </div>
+      {expanded && hasChildren && (
+        <div>
+          {node.children.map((child) => (
+            <TreeItem key={child.id} node={child} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DependencyTree({ graph }: { graph: DependencyGraph }) {
+  const tree = useMemo(() => buildTree(graph), [graph]);
+  const [allExpanded, setAllExpanded] = useState(false);
+  // Use a key to force re-render all TreeItems when toggling expand/collapse
+  const [treeKey, setTreeKey] = useState(0);
+
+  const toggleAll = () => {
+    setAllExpanded(!allExpanded);
+    setTreeKey((k) => k + 1);
+  };
+
+  if (tree.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-muted-foreground py-12">
+        No dependency data available
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex justify-end px-3 pt-2">
+        <Button variant="ghost" size="sm" onClick={toggleAll} className="text-xs h-7">
+          {allExpanded ? "Collapse All" : "Expand All"}
+        </Button>
+      </div>
+      <div className="px-2 pb-3 max-h-[500px] overflow-y-auto" key={treeKey}>
+        {tree.map((node) => (
+          <TreeItemControlled key={node.id} node={node} depth={0} forceExpanded={allExpanded} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TreeItemControlled({ node, depth = 0, forceExpanded }: { node: TreeNode; depth?: number; forceExpanded: boolean }) {
+  const [expanded, setExpanded] = useState(forceExpanded || depth < 2);
+  const hasChildren = node.children.length > 0;
+  const color = typeColors[node.type] || "#6b7280";
+  const label = node.label.replace(/\n/g, " — ");
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors"
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
+        onClick={() => hasChildren && setExpanded(!expanded)}
+      >
+        {hasChildren ? (
+          expanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )
+        ) : (
+          <span className="w-4 shrink-0" />
+        )}
+        <span
+          className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+          style={{ backgroundColor: color }}
+        />
+        <span className="text-sm truncate font-medium">{label}</span>
+        <Badge
+          variant="outline"
+          className="ml-auto text-[10px] shrink-0"
+          style={{ borderColor: color, color }}
+        >
+          {typeLabels[node.type] || node.type}
+        </Badge>
+        {hasChildren && (
+          <span className="text-[10px] text-muted-foreground shrink-0">
+            ({node.children.length})
+          </span>
+        )}
+      </div>
+      {expanded && hasChildren && (
+        <div>
+          {node.children.map((child) => (
+            <TreeItemControlled key={child.id} node={child} depth={depth + 1} forceExpanded={forceExpanded} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function StepDependencies() {
@@ -144,9 +330,16 @@ export function StepDependencies() {
 
       // Component type number → friendly name
       const compTypeLabel: Record<number, string> = {
-        1: "Table", 24: "Security Role", 29: "Cloud Flow", 60: "Canvas App",
-        80: "Model App", 300: "Canvas App", 371: "Connection Ref",
-        380: "Env Variable", 9: "Choice", 122: "Business Rule",
+        1: "Table", 2: "Column", 3: "Relationship", 9: "Choice",
+        10: "Relationship", 20: "Security Role", 24: "Form",
+        26: "View", 29: "Cloud Flow", 31: "Report",
+        36: "Email Template", 59: "Chart", 60: "Form",
+        61: "Web Resource", 62: "Site Map", 66: "Custom Control",
+        80: "Model App", 91: "Plugin", 92: "SDK Step",
+        122: "Business Rule", 176: "Custom API", 300: "Canvas App",
+        371: "Connection Ref", 380: "Env Variable",
+        400: "Agent", 401: "Agent", 402: "Agent",
+        430: "Card", 431: "Card",
       };
 
       // Add selected solutions as root nodes
@@ -159,14 +352,14 @@ export function StepDependencies() {
             seen.add(solId);
           }
 
-          // Fetch components
+          // Fetch components — no limit, show all
           try {
             const components = await listSolutionComponents(token, sourceEnv.orgUrl, solId);
-            for (const comp of components.slice(0, 30)) {
+            for (const comp of components) {
               if (!seen.has(comp.id)) {
-                const resolved = resolveName(comp.name || comp.id, comp.type.replace(/_/g, " "));
-                const typeFriendly = resolved.typeName || comp.type.replace(/_/g, " ");
-                nodes.push({ id: comp.id, label: `${resolved.name}\n${typeFriendly}`, type: comp.type });
+                const displayLabel = comp.displayName !== comp.name ? comp.displayName : comp.name;
+                const typeFriendly = comp.type.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
+                nodes.push({ id: comp.id, label: `${displayLabel}\n${typeFriendly}`, type: comp.type });
                 seen.add(comp.id);
               }
               edges.push({ source: solId, target: comp.id });
@@ -175,10 +368,10 @@ export function StepDependencies() {
             // Component listing may fail for some solution
           }
 
-          // Fetch dependencies
+          // Fetch dependencies — no limit, show all
           try {
             const deps = await getSolutionDependencies(token, sourceEnv.orgUrl, sol.uniquename);
-            for (const dep of deps.slice(0, 50)) {
+            for (const dep of deps) {
               const reqId = dep.requiredComponentObjectId;
               const depId = dep.dependentComponentObjectId;
               const reqTypeLabel = compTypeLabel[dep.requiredComponentType] || "Component";
@@ -264,11 +457,6 @@ export function StepDependencies() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { nodes, edges } = useMemo(
-    () => layoutGraph(dependencyGraph),
-    [dependencyGraph]
-  );
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -293,46 +481,32 @@ export function StepDependencies() {
         </div>
       )}
 
-      {/* Legend */}
-      <div className="flex flex-wrap gap-2">
-        {Object.entries(typeColors).map(([type, color]) => (
+      {/* Legend — only show types present in the data */}
+      <div className="flex flex-wrap items-center gap-2">
+        {Object.entries(typeColors)
+          .filter(([type]) => dependencyGraph.nodes.some((n) => n.type === type))
+          .map(([type, color]) => (
           <Badge
             key={type}
             variant="outline"
             className="text-[10px]"
             style={{ borderColor: color, color }}
           >
-            {type.replace(/_/g, " ")}
+            {typeLabels[type as ComponentType] || type.replace(/_/g, " ")}
           </Badge>
         ))}
       </div>
 
-      {/* Graph */}
+      {/* Visualization */}
       <Card>
         <CardContent className="p-0">
-          <div className="h-[500px] w-full">
-            {nodes.length > 0 ? (
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                fitView
-                attributionPosition="bottom-left"
-                minZoom={0.3}
-                maxZoom={2}
-              >
-                <Background />
-                <Controls />
-                <MiniMap
-                  nodeStrokeWidth={3}
-                  style={{ height: 100, width: 150 }}
-                />
-              </ReactFlow>
-            ) : (
-              <div className="flex h-full items-center justify-center text-muted-foreground">
-                {loading ? "Analyzing dependencies..." : "No dependency data available"}
-              </div>
-            )}
-          </div>
+          {dependencyGraph.nodes.length > 0 ? (
+            <DependencyTree graph={dependencyGraph} />
+          ) : (
+            <div className="flex h-40 items-center justify-center text-muted-foreground">
+              {loading ? "Analyzing dependencies..." : "No dependency data available"}
+            </div>
+          )}
         </CardContent>
       </Card>
 
