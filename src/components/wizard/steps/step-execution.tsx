@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth/auth-context";
 import {
   useEnvironmentStore,
@@ -11,6 +11,9 @@ import {
 import {
   exportSolution,
   importSolution,
+  listPublishers,
+  modifySolutionZip,
+  type Publisher,
 } from "@/lib/api/power-platform";
 import {
   migrateTableData,
@@ -35,6 +38,15 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 import {
   ArrowLeft,
@@ -132,6 +144,38 @@ export function StepExecution() {
 
   const abortRef = useRef(false);
 
+  // ─── Solution override options ──────────────────────────
+  // Per-solution overrides: { [solutionId]: { newName?, publisherId? } }
+  const [solutionOverrides, setSolutionOverrides] = useState<
+    Record<string, { newName?: string; publisherUniqueName?: string }>
+  >({});
+  const [publishers, setPublishers] = useState<Publisher[]>([]);
+  const [loadingPublishers, setLoadingPublishers] = useState(false);
+
+  // Fetch publishers from target env
+  useEffect(() => {
+    if (!targetEnv?.orgUrl) return;
+    let cancelled = false;
+    (async () => {
+      setLoadingPublishers(true);
+      try {
+        const token = await getDataverseToken(targetEnv.orgUrl);
+        const pubs = await listPublishers(token, targetEnv.orgUrl);
+        if (!cancelled) setPublishers(pubs);
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) setLoadingPublishers(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [targetEnv?.orgUrl, getDataverseToken]);
+
+  const selectedSolutionSel = selections.find((s) => s.objectType === "solutions" && s.enabled);
+  const selectedSolutions = (selectedSolutionSel?.items || [])
+    .map((id) => solutions.find((s) => s.solutionid === id))
+    .filter(Boolean) as typeof solutions;
+
   const initializeRun = useCallback((): MigrationRun => {
     const items: MigrationItemProgress[] = [];
 
@@ -214,6 +258,19 @@ export function StepExecution() {
             const solId = item.id.replace("sol-", "");
             const sol = solutions.find((s) => s.solutionid === solId);
             if (sol) {
+              const overrides = solutionOverrides[solId];
+              const hasOverrides = overrides?.newName || overrides?.publisherUniqueName;
+
+              // Helper: apply name/publisher overrides to the zip buffer if configured
+              const applyOverrides = async (buf: ArrayBuffer): Promise<ArrayBuffer> => {
+                if (!hasOverrides) return buf;
+                updateItemStatus(item.id, "in-progress", "Applying solution overrides...");
+                return modifySolutionZip(buf, {
+                  friendlyName: overrides.newName,
+                  publisherUniqueName: overrides.publisherUniqueName,
+                });
+              };
+
               // Check if PAC CLI is available — it handles large solutions/web resources natively
               const pacAvailable = await checkPacAvailability();
               let usedPac = false;
@@ -251,7 +308,8 @@ export function StepExecution() {
 
                   try {
                     updateItemStatus(item.id, "in-progress", "Importing solution via PAC CLI...");
-                    const buffer = await blob.arrayBuffer();
+                    let buffer = await blob.arrayBuffer();
+                    buffer = await applyOverrides(buffer);
                     await pacImportSolution(targetEnv.orgUrl, buffer, (msg) => {
                       updateItemStatus(item.id, "in-progress", msg);
                     });
@@ -277,7 +335,8 @@ export function StepExecution() {
                 const blob = await exportSolution(sourceToken, sourceEnv.orgUrl, sol.uniquename, sol.ismanaged);
 
                 updateItemStatus(item.id, "in-progress", "Importing solution to target via API...");
-                const buffer = await blob.arrayBuffer();
+                let buffer = await blob.arrayBuffer();
+                buffer = await applyOverrides(buffer);
                 await importSolution(targetToken, targetEnv.orgUrl, buffer, true, true, (msg) => {
                   updateItemStatus(item.id, "in-progress", msg);
                 });
@@ -394,7 +453,7 @@ export function StepExecution() {
       setIsRunning(false);
     }
   }, [
-    sourceEnv, targetEnv, getDataverseToken, selections, solutions,
+    sourceEnv, targetEnv, getDataverseToken, selections, solutions, solutionOverrides,
     initializeRun, setCurrentRun, setIsRunning, updateItemStatus,
     incrementCompleted, incrementFailed, incrementWarning, addHistory, updateHistory,
   ]);
@@ -422,6 +481,75 @@ export function StepExecution() {
             : "Configure options and start the migration."}
         </p>
       </div>
+
+      {/* Migration Options — shown before migration starts */}
+      {!isRunning && !currentRun && selectedSolutions.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">Migration Options</CardTitle>
+            <CardDescription>
+              Optionally rename solutions or change the publisher in the destination.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            {selectedSolutions.map((sol) => (
+              <div key={sol.solutionid} className="space-y-3 rounded-lg border p-4">
+                <p className="text-sm font-medium">{sol.friendlyname}</p>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor={`name-${sol.solutionid}`} className="text-xs">
+                      Display Name in Destination
+                    </Label>
+                    <Input
+                      id={`name-${sol.solutionid}`}
+                      placeholder={sol.friendlyname}
+                      value={solutionOverrides[sol.solutionid]?.newName ?? ""}
+                      onChange={(e) =>
+                        setSolutionOverrides((prev) => ({
+                          ...prev,
+                          [sol.solutionid]: {
+                            ...prev[sol.solutionid],
+                            newName: e.target.value || undefined,
+                          },
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor={`pub-${sol.solutionid}`} className="text-xs">
+                      Publisher in Destination
+                    </Label>
+                    <Select
+                      value={solutionOverrides[sol.solutionid]?.publisherUniqueName ?? ""}
+                      onValueChange={(val) =>
+                        setSolutionOverrides((prev) => ({
+                          ...prev,
+                          [sol.solutionid]: {
+                            ...prev[sol.solutionid],
+                            publisherUniqueName: val === "__keep__" ? undefined : val,
+                          },
+                        }))
+                      }
+                    >
+                      <SelectTrigger id={`pub-${sol.solutionid}`}>
+                        <SelectValue placeholder={loadingPublishers ? "Loading publishers…" : "Keep current publisher"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__keep__">Keep current publisher</SelectItem>
+                        {publishers.map((p) => (
+                          <SelectItem key={p.publisherid} value={p.uniquename}>
+                            {p.friendlyname} ({p.customizationprefix})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Progress */}
       {currentRun && (
